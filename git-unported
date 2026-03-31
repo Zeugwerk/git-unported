@@ -3,14 +3,34 @@
 # accounts for cherry-picks made with -x in either direction
 # runs on root repo and all submodules
 #
-# Usage: git-unported [main-branch] [release-branch] [remote]
+# Usage: git-unported [--conventional-only|-c] [main-branch] [release-branch] [remote]
 # Defaults: main  release/1.0  origin
 
 set -euo pipefail
 
-MAIN="${1:-main}"
-RELEASE="${2:-release/1.0}"
-REMOTE="${3:-origin}"
+CONVENTIONAL_ONLY=0
+POS=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --conventional-only | -c) CONVENTIONAL_ONLY=1; shift ;;
+    -h | --help)
+      cat <<'EOF'
+Usage: git-unported [--conventional-only|-c] [main-branch] [release-branch] [remote]
+
+  --conventional-only, -c   list only conventional commits (feat:, fix:, docs:, …)
+  -h, --help                show this help
+
+Defaults: main  release/1.0  origin
+EOF
+      exit 0
+      ;;
+    *) POS+=("$1"); shift ;;
+  esac
+done
+
+MAIN="${POS[0]:-main}"
+RELEASE="${POS[1]:-release/1.0}"
+REMOTE="${POS[2]:-origin}"
 
 BOLD=$'\e[1m'
 DIM=$'\e[2m'
@@ -21,15 +41,29 @@ GREEN=$'\e[32m'
 MAGENTA=$'\e[35m'
 RED=$'\e[31m'
 
-# First line matches Conventional Commits (type, optional scope, optional !, : description)
+# Non-blank body lines to print after the subject (rest is truncated with "…")
+BODY_LINES_MAX=4
+
+strip_body_edges() {
+  local s=$1
+  while [[ "$s" == $'\n'* ]]; do s="${s#$'\n'}"; done
+  while [[ "$s" == *$'\n' ]]; do s="${s%$'\n'}"; done
+  printf '%s' "$s"
+}
+
+# First line matches Conventional Commits (type, optional scope, optional !, : description).
+# Allows a space before "(" (e.g. "fix (scope): …" as well as "fix(scope): …").
+# (regex in a variable — bash [[ =~ ]] misparses some nested-paren patterns when inlined)
 is_conventional() {
-  [[ "$1" =~ ^[a-z][a-z0-9]*(\([^)]*\))?(!)?:[[:space:]]* ]]
+  local re='^[a-z][a-z0-9]*[[:space:]]*(\([^)]*\))?(!)?:[[:space:]]*'
+  [[ "$1" =~ $re ]]
 }
 
 # Colorize the first line when it is conventional (type token highlighted by category)
 format_conv_first_line() {
   local line="$1"
-  if [[ "$line" =~ ^([a-z][a-z0-9]*)(\([^)]*\))?(!)?(:)[[:space:]]*(.*)$ ]]; then
+  local re='^([a-z][a-z0-9]*)([[:space:]]*\([^)]*\))?(!)?(:)[[:space:]]*(.*)$'
+  if [[ "$line" =~ $re ]]; then
     local typ="${BASH_REMATCH[1]}"
     local scope_bang="${BASH_REMATCH[2]}${BASH_REMATCH[3]}${BASH_REMATCH[4]}"
     local desc="${BASH_REMATCH[5]}"
@@ -63,6 +97,9 @@ print_commit_block() {
     rest=""
   fi
 
+  rest=$(strip_body_edges "$rest")
+  [[ "$rest" =~ ^[[:space:]]*$ ]] && rest=""
+
   printf "  ${YELLOW}%-10s${RESET}  ${DIM}%-11s${RESET}  ${GREEN}%-22s${RESET}  " \
     "$hash" "$date" "$author"
 
@@ -73,16 +110,31 @@ print_commit_block() {
   fi
 
   if [[ -n "$rest" ]]; then
+    local shown=0 total_nb=0
     while IFS= read -r line || [[ -n "$line" ]]; do
-      if [[ "$mode" == conv ]]; then
-        printf "  ${YELLOW}%-10s${RESET}  ${DIM}%-11s${RESET}  ${GREEN}%-22s${RESET}  ${DIM}%s${RESET}\n" \
-          "" "" "" "$line"
-      else
-        printf "  ${DIM}%-10s  %-11s  %-22s  %s${RESET}\n" "" "" "" "$line"
+      [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+      # Omit git's -x trailer when it appears in the source commit message (noise for release notes)
+      [[ "$line" =~ ^[[:space:]]*\(cherry[[:space:]]picked[[:space:]]from[[:space:]]commit[[:space:]]+[0-9a-f]+\)[[:space:]]*$ ]] && continue
+      total_nb=$((total_nb + 1))
+      if ((shown < BODY_LINES_MAX)); then
+        if [[ "$mode" == conv ]]; then
+          printf "  ${YELLOW}%-10s${RESET}  ${DIM}%-11s${RESET}  ${GREEN}%-22s${RESET}  ${DIM}%s${RESET}\n" \
+            "" "" "" "$line"
+        else
+          printf "  ${DIM}%-10s  %-11s  %-22s  %s${RESET}\n" "" "" "" "$line"
+        fi
+        shown=$((shown + 1))
       fi
     done <<< "$rest"
+    if ((total_nb > BODY_LINES_MAX)); then
+      if [[ "$mode" == conv ]]; then
+        printf "  ${YELLOW}%-10s${RESET}  ${DIM}%-11s${RESET}  ${GREEN}%-22s${RESET}  ${DIM}… (truncated)${RESET}\n" \
+          "" "" ""
+      else
+        printf "  ${DIM}%-10s  %-11s  %-22s  … (truncated)${RESET}\n" "" "" ""
+      fi
+    fi
   fi
-  echo ""
 }
 
 check_repo() {
@@ -116,10 +168,18 @@ check_repo() {
   local -a ch=() cd=() ca=() cm=()
   local -a oh=() od=() oa=() om=()
 
-  while IFS= read -r -d '' hash; do
-    IFS= read -r -d '' date || break
-    IFS= read -r -d '' author || break
-    IFS= read -r -d '' message || break
+  # Use \x1e between fields: --format cannot contain NUL (C string). -z still NUL-terminates each commit record.
+  local RS=$'\x1e'
+
+  while IFS= read -r -d '' record; do
+    local r hash date author message
+    r=$record
+    hash="${r%%"$RS"*}"
+    r="${r#*"$RS"}"
+    date="${r%%"$RS"*}"
+    r="${r#*"$RS"}"
+    author="${r%%"$RS"*}"
+    message="${r#*"$RS"}"
 
     local full_hash
     full_hash=$(git rev-parse "$hash" 2>/dev/null || echo "")
@@ -143,11 +203,12 @@ check_repo() {
       oa+=("$author")
       om+=("$message")
     fi
-  done < <(git log "$mb" --not "$rb" -z --format=$'%h%c0%ad%c0%an%c0%B' --date=short 2>/dev/null || true)
+  done < <(git log "$mb" --not "$rb" -z --format="%h${RS}%ad${RS}%an${RS}%B" --date=short 2>/dev/null || true)
 
   local n_conv=${#ch[@]}
   local n_other=${#oh[@]}
   ((n_conv + n_other == 0)) && return
+  ((CONVENTIONAL_ONLY && n_conv == 0)) && return
 
   local rule_w="${COLUMNS:-120}"
   ((rule_w < 88)) && rule_w=88
@@ -165,7 +226,7 @@ check_repo() {
   echo "${DIM}${rule_line}${RESET}"
 
   local i
-  if ((n_conv > 0 && n_other > 0)); then
+  if ((n_conv > 0 && n_other > 0 && CONVENTIONAL_ONLY == 0)); then
     echo ""
     echo "${BOLD}  Conventional commits${RESET}  ${DIM}(feat, fix, docs, …)${RESET}"
     echo "${DIM}${rule_line}${RESET}"
@@ -175,7 +236,7 @@ check_repo() {
     print_commit_block "${ch[i]}" "${cd[i]}" "${ca[i]}" "${cm[i]}" conv
   done
 
-  if ((n_other > 0)); then
+  if ((n_other > 0 && CONVENTIONAL_ONLY == 0)); then
     echo ""
     if ((n_conv > 0)); then
       echo "${DIM}  Other commits${RESET}  ${DIM}(no conventional prefix — often minor)${RESET}"
@@ -207,6 +268,9 @@ cd "$REPO_ROOT" || {
 echo ""
 echo "${BOLD}Unported commits${RESET}  ${CYAN}${MAIN}${RESET} → not in ${CYAN}${RELEASE}${RESET}"
 echo "${DIM}Commits already cherry-picked with -x are excluded.${RESET}"
+if ((CONVENTIONAL_ONLY)); then
+  echo "${DIM}Showing conventional commits only (use without --conventional-only to include the rest).${RESET}"
+fi
 
 # root repo
 check_repo "root" "." "$MAIN" "$RELEASE"

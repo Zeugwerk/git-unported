@@ -35,20 +35,26 @@ Run it from **any directory inside the repository** (including inside a submodul
 ## Usage
 
 ```text
-git-unported [main-branch] [release-branch] [remote]
+git-unported [--conventional-only|-c] [main-branch] [release-branch] [remote]
 ```
 
-| Argument | Default | Role |
-|----------|---------|------|
+| Argument / flag | Default | Role |
+|-----------------|---------|------|
+| `--conventional-only`, `-c` | off | Omit the **Other commits** block; repos with only non-conventional unported commits print **no** section for that repo. |
 | `main-branch` | `main` | “Source” branch (where new work lives) |
 | `release-branch` | `release/1.0` | “Target” branch (what you ship / maintain) |
 | `remote` | `origin` | Used for `git fetch` and for `origin/<branch>` refs when they exist |
+
+Flags may appear **before** the branch arguments (recommended).
 
 Examples:
 
 ```bash
 # Typical: what’s on main but not on the 1.6 release line?
 git-unported main release/1.6 origin
+
+# Same, but only conventional commits (no “Update foo.md” / unprefixed lines)
+git-unported --conventional-only main release/1.6 origin
 
 # Shorter if defaults match your repo
 git-unported
@@ -58,11 +64,17 @@ The script tries **`$remote/$branch`** first (e.g. `origin/main`); if that ref d
 
 ## Output
 
-For each repo that has **at least one** matching commit, you get a section with:
+For each repo that has **at least one** matching commit, you get a table header (`hash`, `date`, `author`, `message`) and then commits grouped for **release notes**:
 
-- short hash, date, author (truncated for column layout), **full commit subject** (no truncation — handy for copy-paste into release notes).
+1. **Conventional commits** — first line matches [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix(scope):`, `docs:`, `chore!:`, …), with a small tolerance for a **space before the scope** (e.g. `fix (PowerMeasurementEL34x3): …`). The **type** is color-coded (for example `feat` / `fix` / `doc` / `ci` / `chore`). Lines after the subject come from the commit body: **blank lines are skipped**, lines that are only `(cherry picked from commit …)` are omitted (common when that text was copied into the message), leading/trailing empty body text is ignored, and only the **first few non-blank body lines** are shown (default 4), then `… (truncated)` if there is more. Adjust `BODY_LINES_MAX` at the top of the script if you want more or fewer lines. Commits are printed **one after another with no blank line** between entries.
+
+2. **Other commits** — anything without that prefix (often mechanical one-liners like “Update toc.yml”) is listed **after** the conventional block, fully dimmed, so the important items read first.
+
+If a repo only has conventional commits (or only non-conventional ones), the script omits the redundant subsection heading and prints a single list.
 
 Sections with **no** unported commits produce **no** output (by design).
+
+Commit bodies may contain any character except ASCII **record separator** (`0x1E`), which the script uses internally when reading `git log` output (extremely unlikely in normal messages).
 
 ## How “unported” is defined
 
