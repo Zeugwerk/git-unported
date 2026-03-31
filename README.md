@@ -1,6 +1,6 @@
 # git-unported
 
-Small Bash helper that lists **commits present on an integration branch (for example `main`) but not on a release branch (for example `release/1.6`)**, in a form you can use for **release notes** and **backport checklists**.
+Tooling that lists **commits present on an integration branch (for example `main`) but not on a release branch (for example `release/1.6`)**, in a form you can use for **release notes** and **backport checklists**. Implemented as **`git_unported.py`** (Python 3, stdlib only; shells out to `git`).
 
 It runs in the **top-level Git repo** and, when `.gitmodules` exists, repeats the same check for **each first-level submodule**.
 
@@ -18,34 +18,38 @@ Typical pattern:
   - **What is still only on `main`?** (candidates for the next patch release or for “known gaps” in the release notes.)
   - **Did we already cherry-pick something?** (so you do not duplicate work.)
 
-`git-unported` answers the first question **per repository** (superproject + each submodule), while **hiding commits that already appear as cherry-picks on the release branch** when those cherry-picks were done with **`git cherry-pick -x`** (so the trailer `(cherry picked from commit <hash>)` is present in the release branch history).
+The tool answers the first question **per repository** (superproject + each submodule), while **hiding commits that already appear as cherry-picks on the release branch** when those cherry-picks were done with **`git cherry-pick -x`** (so the trailer `(cherry picked from commit <hash>)` is present in the release branch history).
 
 ## Requirements
 
-- Bash 4+ (associative arrays for patch-id lookup)
-- Git (uses `git rev-parse`, `git log`, `git patch-id`, submodule layout)
+- **Python:** 3.9+
+- **Git:** `git rev-parse`, `git log`, `git patch-id`, submodule layout
 
 ## Setup
 
-Put `git-unported` on your `PATH` and ensure it is executable:
+Put `git_unported.py` on your `PATH` (or run it by path) and ensure it is executable if you want `./git_unported.py`:
 
 ```bash
-chmod +x git-unported
-# e.g. copy or symlink into ~/bin
+chmod +x git_unported.py
+./git_unported.py main release/1.6 origin
+# or: python3 git_unported.py -c -F main release/1.6 origin
 ```
+
+Environment variables: `BODY_LINES_MAX`, `SUBJECT_DEDUP`, `PATCH_ID_INDEX_MAX`, `NO_COLOR`, `COLUMNS`.
 
 Run it from **any directory inside the repository** (including inside a submodule checkout). If Git reports a **superproject** and that superproject has a `.gitmodules` file, the script anchors on the superproject so **all sibling submodules** are still scanned.
 
 ## Usage
 
 ```text
-git-unported [options] [main-branch] [release-branch] [remote]
+git_unported.py [options] [main-branch] [release-branch] [remote]
 ```
 
 | Argument / flag | Default | Role |
 |-----------------|---------|------|
 | `--conventional-only`, `-c` | off | Omit the **Other commits** block; repos with only non-conventional unported commits print **no** section for that repo. |
 | `--feat-fix-only`, `-F` | off | Show only **`feat:`** and **`fix:`** (including `feat!` / `fix!` and optional scope). Hides `docs:`, `chore:`, unprefixed commits, and all other types. |
+| `--verbose`, `-v` | off | Print candidate counts and filter outcomes on **stderr** (useful when output is empty). |
 | `main-branch` | `main` | “Source” branch (where new work lives) |
 | `release-branch` | `release/1.0` | “Target” branch (what you ship / maintain) |
 | `remote` | `origin` | Used for `git fetch` and for `origin/<branch>` refs when they exist |
@@ -56,25 +60,25 @@ Examples:
 
 ```bash
 # Typical: what’s on main but not on the 1.6 release line?
-git-unported main release/1.6 origin
+git_unported.py main release/1.6 origin
 
 # Same, but only conventional commits (no “Update foo.md” / unprefixed lines)
-git-unported --conventional-only main release/1.6 origin
+git_unported.py --conventional-only main release/1.6 origin
 
 # Only new features and fixes (release-notes style)
-git-unported --feat-fix-only main release/1.6 origin
+git_unported.py --feat-fix-only main release/1.6 origin
 
 # Shorter if defaults match your repo
-git-unported
+git_unported.py
 ```
 
-The script tries **`$remote/$branch`** first (e.g. `origin/main`); if that ref does not exist, it falls back to the **local** branch name (`main`, `release/1.6`). It runs `git fetch "$remote"` best-effort (errors ignored) so remote-tracking branches are often up to date.
+The script tries **`$remote/$branch`** first (e.g. `origin/main`); if that ref does not exist, it falls back to the **local** branch name (`main`, `release/1.6`). It runs `git fetch "$remote"` best-effort and prints fetch and other Git failures on **stderr**.
 
 ## Output
 
 For each repo that has **at least one** matching commit, you get a table header (`hash`, `date`, `author`, `message`) and then commits grouped for **release notes**:
 
-1. **Conventional commits:** first line matches [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix(scope):`, `docs:`, `chore!:`, …), with a small tolerance for a **space before the scope** (e.g. `fix (PowerMeasurementEL34x3): …`). The **type** is color-coded (for example `feat` / `fix` / `doc` / `ci` / `chore`). Lines after the subject come from the commit body: **blank lines are skipped**, lines that are only `(cherry picked from commit …)` are omitted (common when that text was copied into the message), leading/trailing empty body text is ignored, and only the **first few non-blank body lines** are shown (default 4), then `… (truncated)` if there is more. Adjust `BODY_LINES_MAX` at the top of the script if you want more or fewer lines. Commits are printed **one after another with no blank line** between entries.
+1. **Conventional commits:** first line matches [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix(scope):`, `docs:`, `chore!:`, …), with a small tolerance for a **space before the scope** (e.g. `fix (PowerMeasurementEL34x3): …`). The **type** is color-coded (for example `feat` / `fix` / `doc` / `ci` / `chore`). Lines after the subject come from the commit body: **blank lines are skipped**, lines that are only `(cherry picked from commit …)` are omitted (common when that text was copied into the message), leading/trailing empty body text is ignored, and only the **first few non-blank body lines** are shown (default 4), then `… (truncated)` if there is more. Set **`BODY_LINES_MAX`** if you want more or fewer lines. Commits are printed **one after another with no blank line** between entries.
 
 2. **Other commits:** anything without that prefix (often mechanical one-liners like “Update toc.yml”) is listed **after** the conventional block, fully dimmed, so the important items read first.
 
