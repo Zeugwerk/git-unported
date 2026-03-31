@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # git-unported — show commits on MAIN not yet in RELEASE
-# accounts for cherry-picks made with -x in either direction
+# excludes: (1) -x cherry-pick trailers on release (wins on conflict)
+#           (2) same patch-id on release (git cherry)
 # runs on root repo and all submodules
 #
 # Usage: git-unported [--conventional-only|-c] [main-branch] [release-branch] [remote]
@@ -165,6 +166,16 @@ check_repo() {
     | grep -oE '\(cherry picked from commit [0-9a-f]+\)' \
     | grep -oE '[0-9a-f]{7,}' || true)
 
+  # Commits on main^release whose patch is already present on release (patch-id).
+  # Applied only if not already dropped by -x above (-x wins if cherry disagrees).
+  local -A patch_already_on_release=()
+  local sign c_hash full_c
+  while read -r sign c_hash _; do
+    [[ "$sign" == "-" ]] || continue
+    full_c=$(git rev-parse --verify "${c_hash}^{commit}" 2>/dev/null) || continue
+    patch_already_on_release["$full_c"]=1
+  done < <(git cherry -v "$rb" "$mb" 2>/dev/null || true)
+
   local -a ch=() cd=() ca=() cm=()
   local -a oh=() od=() oa=() om=()
 
@@ -184,11 +195,14 @@ check_repo() {
     local full_hash
     full_hash=$(git rev-parse "$hash" 2>/dev/null || echo "")
 
-    local skip=0
     if [[ -n "$ported" && -n "$full_hash" ]]; then
-      echo "$ported" | grep -qF "${full_hash:0:12}" && skip=1
+      if echo "$ported" | grep -qF "${full_hash:0:12}"; then
+        continue
+      fi
     fi
-    [[ $skip -eq 1 ]] && continue
+    if [[ -n "$full_hash" && -n "${patch_already_on_release[$full_hash]+x}" ]]; then
+      continue
+    fi
 
     local first_line="${message%%$'\n'*}"
 
@@ -267,7 +281,7 @@ cd "$REPO_ROOT" || {
 
 echo ""
 echo "${BOLD}Unported commits${RESET}  ${CYAN}${MAIN}${RESET} → not in ${CYAN}${RELEASE}${RESET}"
-echo "${DIM}Commits already cherry-picked with -x are excluded.${RESET}"
+echo "${DIM}Excluded: -x cherry-pick trailers on the release branch (if in doubt, this wins), and commits whose patch already exists on release (git cherry / patch-id).${RESET}"
 if ((CONVENTIONAL_ONLY)); then
   echo "${DIM}Showing conventional commits only (use without --conventional-only to include the rest).${RESET}"
 fi

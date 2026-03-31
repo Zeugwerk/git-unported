@@ -15,15 +15,15 @@ Typical pattern:
 - Day-to-day work lands on **`main`** (or `develop`).
 - Fixes and selected changes are **cherry-picked** (or otherwise applied) onto **`release/x.y`** for shipping.
 - Before tagging or publishing, you want to know:
-  - **What is still only on `main`?** — candidates for the next patch release or for “known gaps” in the release notes.
-  - **Did we already cherry-pick something?** — avoid duplicating work.
+  - **What is still only on `main`?** (candidates for the next patch release or for “known gaps” in the release notes.)
+  - **Did we already cherry-pick something?** (so you do not duplicate work.)
 
 `git-unported` answers the first question **per repository** (superproject + each submodule), while **hiding commits that already appear as cherry-picks on the release branch** when those cherry-picks were done with **`git cherry-pick -x`** (so the trailer `(cherry picked from commit <hash>)` is present in the release branch history).
 
 ## Requirements
 
-- Bash
-- Git (uses `git rev-parse`, `git log`, submodule layout)
+- Bash 4+ (associative arrays for patch-id lookup)
+- Git (uses `git rev-parse`, `git log`, `git cherry`, submodule layout)
 
 ## Setup
 
@@ -70,9 +70,9 @@ The script tries **`$remote/$branch`** first (e.g. `origin/main`); if that ref d
 
 For each repo that has **at least one** matching commit, you get a table header (`hash`, `date`, `author`, `message`) and then commits grouped for **release notes**:
 
-1. **Conventional commits** — first line matches [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix(scope):`, `docs:`, `chore!:`, …), with a small tolerance for a **space before the scope** (e.g. `fix (PowerMeasurementEL34x3): …`). The **type** is color-coded (for example `feat` / `fix` / `doc` / `ci` / `chore`). Lines after the subject come from the commit body: **blank lines are skipped**, lines that are only `(cherry picked from commit …)` are omitted (common when that text was copied into the message), leading/trailing empty body text is ignored, and only the **first few non-blank body lines** are shown (default 4), then `… (truncated)` if there is more. Adjust `BODY_LINES_MAX` at the top of the script if you want more or fewer lines. Commits are printed **one after another with no blank line** between entries.
+1. **Conventional commits:** first line matches [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix(scope):`, `docs:`, `chore!:`, …), with a small tolerance for a **space before the scope** (e.g. `fix (PowerMeasurementEL34x3): …`). The **type** is color-coded (for example `feat` / `fix` / `doc` / `ci` / `chore`). Lines after the subject come from the commit body: **blank lines are skipped**, lines that are only `(cherry picked from commit …)` are omitted (common when that text was copied into the message), leading/trailing empty body text is ignored, and only the **first few non-blank body lines** are shown (default 4), then `… (truncated)` if there is more. Adjust `BODY_LINES_MAX` at the top of the script if you want more or fewer lines. Commits are printed **one after another with no blank line** between entries.
 
-2. **Other commits** — anything without that prefix (often mechanical one-liners like “Update toc.yml”) is listed **after** the conventional block, fully dimmed, so the important items read first.
+2. **Other commits:** anything without that prefix (often mechanical one-liners like “Update toc.yml”) is listed **after** the conventional block, fully dimmed, so the important items read first.
 
 If a repo only has conventional commits (or only non-conventional ones), the script omits the redundant subsection heading and prints a single list.
 
@@ -82,13 +82,16 @@ Commit bodies may contain any character except ASCII **record separator** (`0x1E
 
 ## How “unported” is defined
 
-1. **Candidates:** commits reachable from the main branch that are **not** reachable from the release branch — same idea as `git log main --not release/...`.
-2. **Cherry-pick filter:** from the **entire** history of the release branch (commit messages / bodies), collect hashes mentioned in lines like `(cherry picked from commit deadbeef...)`. Any candidate whose hash **matches** one of those (prefix match on the first 12 hex chars of the full hash) is **dropped** from the list.
+1. **Candidates:** commits reachable from the main branch that are **not** reachable from the release branch (same idea as `git log main --not release/...`).
+
+2. **Drop if `-x` says so (takes precedence):** scan the **entire** history of the release branch for `(cherry picked from commit <hash>)`. If a candidate’s hash **matches** one of those (prefix match on the first 12 hex characters of the full hash), it is **dropped**. If this rule disagrees with patch-id below, **this rule wins**.
+
+3. **Drop if the patch is already on release:** run `git cherry <release> <main>` (same commit set as above). Lines prefixed with `-` mean Git considers an **equivalent patch** already present on the release branch (patch-id). Those candidates are **dropped** unless they were already handled in step 2.
 
 So:
 
-- Cherry-picks done **with `-x`** are treated as “already ported” for listing purposes.
-- Cherry-picks **without** `-x`, or copies with rewritten messages, **still show up** as unported even if the patch is already on the release branch.
+- Cherry-picks **with `-x`** still hide the source commit even when `git cherry` would show `+` (e.g. amended or diverging cherry-pick text).
+- Cherry-picks **without `-x`** can still be hidden when `git cherry` reports `-`.
 
 ## Submodules
 
@@ -97,5 +100,5 @@ So:
 
 ## Limitations (good to know)
 
-- Relies on **`cherry-pick -x`** trailers for the “already ported” heuristic; other workflows may need manual interpretation.
+- **Patch-id** can miss or over-match in unusual cases (rebases, conflict resolutions, identical one-line diffs in two places). Treat the list as a strong hint, not a formal proof.
 - **Merge-heavy** histories can make “not in release” mean something subtler than “this single commit isn’t there”; the underlying logic is Git’s reachability (`--not`), not a semantic diff of patches.
