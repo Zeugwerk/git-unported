@@ -23,7 +23,7 @@ Typical pattern:
 ## Requirements
 
 - Bash 4+ (associative arrays for patch-id lookup)
-- Git (uses `git rev-parse`, `git log`, `git cherry`, submodule layout)
+- Git (uses `git rev-parse`, `git log`, `git patch-id`, submodule layout)
 
 ## Setup
 
@@ -90,12 +90,16 @@ Commit bodies may contain any character except ASCII **record separator** (`0x1E
 
 2. **Drop if `-x` says so (takes precedence):** scan the **entire** history of the release branch for `(cherry picked from commit <hash>)`. If a candidate’s hash **matches** one of those (prefix match on the first 12 hex characters of the full hash), it is **dropped**. If this rule disagrees with patch-id below, **this rule wins**.
 
-3. **Drop if the patch is already on release:** run `git cherry <release> <main>` (same commit set as above). Lines prefixed with `-` mean Git considers an **equivalent patch** already present on the release branch (patch-id). Those candidates are **dropped** unless they were already handled in step 2.
+3. **Drop if the same patch and subject appear on release:** the script scans the release branch and builds a map from **stable patch-id** (`git patch-id --stable`) to **`%s` subject lines**. A candidate is **dropped** if its patch-id matches and its **normalized** first line matches one of those subjects (trimmed, CR stripped, lowercased, internal whitespace collapsed). Step 2 still wins on conflict.
+
+4. **Drop if the same subject line already exists on release (default on):** while scanning release, every commit’s `%s` is added to a set of **normalized** subjects. If the candidate’s normalized first line is in that set, it is **dropped**. Normalization includes lowercasing, trimming, collapsing whitespace, and stripping trailing **`(#123)`**-style PR/issue suffixes so `fix: foo` and `fix: foo (#235)` match. This catches cherry-picks and rebases where the **patch-id differs** but the title is the same. Set **`SUBJECT_DEDUP=0`** to turn this off if you rely on repeating identical subjects for different changes.
 
 So:
 
-- Cherry-picks **with `-x`** still hide the source commit even when `git cherry` would show `+` (e.g. amended or diverging cherry-pick text).
-- Cherry-picks **without `-x`** can still be hidden when `git cherry` reports `-`.
+- Cherry-picks **with `-x`** still hide the source commit by hash when the trailer matches, even if steps 3–4 would disagree.
+- Steps 3–4 reduce false “still unported” when the change or the same title is already on release under a different commit object.
+
+**Large repos:** set `PATCH_ID_INDEX_MAX` to a positive number to only scan that many **newest** commits on the release branch when building the maps (older matches may be missed).
 
 ## Submodules
 
@@ -104,5 +108,5 @@ So:
 
 ## Limitations (good to know)
 
-- **Patch-id** can miss or over-match in unusual cases (rebases, conflict resolutions, identical one-line diffs in two places). Treat the list as a strong hint, not a formal proof.
+- **Normalized subject dedup** can hide a second legitimate commit that reuses the exact same title as an older one on release; use `SUBJECT_DEDUP=0` if that bites you.
 - **Merge-heavy** histories can make “not in release” mean something subtler than “this single commit isn’t there”; the underlying logic is Git’s reachability (`--not`), not a semantic diff of patches.

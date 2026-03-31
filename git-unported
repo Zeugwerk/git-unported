@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # git-unported — show commits on MAIN not yet in RELEASE
 # excludes: (1) -x cherry-pick trailers on release (wins on conflict)
-#           (2) same patch-id on release (git cherry)
+#           (2) same stable patch-id on release AND same trimmed first subject line
 # runs on root repo and all submodules
 #
 # Usage: git-unported [options] [main-branch] [release-branch] [remote]
@@ -53,6 +53,13 @@ strip_body_edges() {
   while [[ "$s" == $'\n'* ]]; do s="${s#$'\n'}"; done
   while [[ "$s" == *$'\n' ]]; do s="${s%$'\n'}"; done
   printf '%s' "$s"
+}
+
+# Normalized subject for matching across branches (case, whitespace, CR, trailing PR refs)
+normalize_subject_key() {
+  printf '%s' "$1" | LC_ALL=C tr -d '\r' | LC_ALL=C tr '[:upper:]' '[:lower:]' \
+    | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]]\{1,\}/ /g' \
+    | sed -e :a -e 's/[[:space:]]*[(]#[0-9][0-9]*[)]$//' -e ta
 }
 
 # First line matches Conventional Commits (type, optional scope, optional !, : description).
@@ -179,15 +186,32 @@ check_repo() {
     | grep -oE '\(cherry picked from commit [0-9a-f]+\)' \
     | grep -oE '[0-9a-f]{7,}' || true)
 
-  # Commits on main^release whose patch is already present on release (patch-id).
-  # Applied only if not already dropped by -x above (-x wins if cherry disagrees).
-  local -A patch_already_on_release=()
-  local sign c_hash full_c
-  while read -r sign c_hash _; do
-    [[ "$sign" == "-" ]] || continue
-    full_c=$(git rev-parse --verify "${c_hash}^{commit}" 2>/dev/null) || continue
-    patch_already_on_release["$full_c"]=1
-  done < <(git cherry -v "$rb" "$mb" 2>/dev/null || true)
+  # Scan release: (1) patch-id -> subjects, (2) set of normalized subjects (same line landed on release).
+  # Optional: PATCH_ID_INDEX_MAX=N limits how many release commits are scanned (newest first).
+  local -A rel_patch_subj=()
+  local -A rel_norm_subj=()
+  local rh pid subj nk rev_extra
+  if [[ "${PATCH_ID_INDEX_MAX:-}" =~ ^[0-9]+$ ]] && ((PATCH_ID_INDEX_MAX > 0)); then
+    rev_extra=(--max-count="$PATCH_ID_INDEX_MAX")
+  else
+    rev_extra=()
+  fi
+  while read -r rh; do
+    [[ -z "$rh" ]] && continue
+    subj=$(git log -1 --format=%s "$rh" 2>/dev/null)
+    [[ -z "$subj" ]] && continue
+    nk=$(normalize_subject_key "$subj")
+    if [[ -n "$nk" ]]; then
+      rel_norm_subj["$nk"]=1
+    fi
+    pid=$(git show "$rh" --no-textconv -p --pretty=format: 2>/dev/null | git patch-id --stable 2>/dev/null | awk '{print $1}')
+    [[ -z "$pid" ]] && continue
+    if [[ -n "${rel_patch_subj[$pid]:-}" ]]; then
+      rel_patch_subj["$pid"]+=$'\n'"$subj"
+    else
+      rel_patch_subj["$pid"]="$subj"
+    fi
+  done < <(git rev-list "${rev_extra[@]}" "$rb" 2>/dev/null || true)
 
   local -a ch=() cd=() ca=() cm=()
   local -a oh=() od=() oa=() om=()
@@ -213,11 +237,31 @@ check_repo() {
         continue
       fi
     fi
-    if [[ -n "$full_hash" && -n "${patch_already_on_release[$full_hash]+x}" ]]; then
-      continue
-    fi
 
     local first_line="${message%%$'\n'*}"
+
+    if [[ -n "$full_hash" ]]; then
+      local cpid ct st s_line match_pm=0
+      cpid=$(git show "$full_hash" --no-textconv -p --pretty=format: 2>/dev/null | git patch-id --stable 2>/dev/null | awk '{print $1}')
+      if [[ -n "$cpid" && -n "${rel_patch_subj[$cpid]:-}" ]]; then
+        ct=$(normalize_subject_key "$first_line")
+        while IFS= read -r s_line || [[ -n "$s_line" ]]; do
+          st=$(normalize_subject_key "$s_line")
+          [[ -n "$ct" && "$st" == "$ct" ]] && match_pm=1 && break
+        done <<< "${rel_patch_subj[$cpid]}"
+        if ((match_pm)); then
+          continue
+        fi
+      fi
+    fi
+
+    # Same subject already exists on release (handles cherry-picks where patch-id differs).
+    if [[ "${SUBJECT_DEDUP:-1}" != "0" ]]; then
+      nk=$(normalize_subject_key "$first_line")
+      if [[ -n "$nk" && -n "${rel_norm_subj[$nk]+x}" ]]; then
+        continue
+      fi
+    fi
 
     if is_conventional "$first_line"; then
       if ((FEAT_FIX_ONLY)) && ! is_feat_or_fix "$first_line"; then
@@ -299,7 +343,7 @@ cd "$REPO_ROOT" || {
 
 echo ""
 echo "${BOLD}Unported commits${RESET}  ${CYAN}${MAIN}${RESET} → not in ${CYAN}${RELEASE}${RESET}"
-echo "${DIM}Excluded: -x cherry-pick trailers on the release branch (if in doubt, this wins), and commits whose patch already exists on release (git cherry / patch-id).${RESET}"
+echo "${DIM}Excluded: -x trailers (win on conflict); same patch-id + subject on release; or same normalized subject as any commit on release (set SUBJECT_DEDUP=0 to disable the last).${RESET}"
 if ((CONVENTIONAL_ONLY)); then
   echo "${DIM}Showing conventional commits only (use without --conventional-only to include the rest).${RESET}"
 fi
