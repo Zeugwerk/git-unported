@@ -39,12 +39,13 @@ Run it from **any directory inside the repository** (including inside a submodul
 ## Usage
 
 ```text
-git-unported [--conventional-only|-c] [main-branch] [release-branch] [remote]
+git-unported [options] [main-branch] [release-branch] [remote]
 ```
 
 | Argument / flag | Default | Role |
 |-----------------|---------|------|
 | `--conventional-only`, `-c` | off | Omit the **Other commits** block; repos with only non-conventional unported commits print **no** section for that repo. |
+| `--feat-fix-only`, `-F` | off | Show only **`feat:`** and **`fix:`** (including `feat!` / `fix!` and optional scope). Hides `docs:`, `chore:`, unprefixed commits, and all other types. |
 | `main-branch` | `main` | “Source” branch (where new work lives) |
 | `release-branch` | `release/1.0` | “Target” branch (what you ship / maintain) |
 | `remote` | `origin` | Used for `git fetch` and for `origin/<branch>` refs when they exist |
@@ -59,6 +60,9 @@ git-unported main release/1.6 origin
 
 # Same, but only conventional commits (no “Update foo.md” / unprefixed lines)
 git-unported --conventional-only main release/1.6 origin
+
+# Only new features and fixes (release-notes style)
+git-unported --feat-fix-only main release/1.6 origin
 
 # Shorter if defaults match your repo
 git-unported

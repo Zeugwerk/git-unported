@@ -4,22 +4,25 @@
 #           (2) same patch-id on release (git cherry)
 # runs on root repo and all submodules
 #
-# Usage: git-unported [--conventional-only|-c] [main-branch] [release-branch] [remote]
+# Usage: git-unported [options] [main-branch] [release-branch] [remote]
 # Defaults: main  release/1.0  origin
 
 set -euo pipefail
 
 CONVENTIONAL_ONLY=0
+FEAT_FIX_ONLY=0
 POS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --conventional-only | -c) CONVENTIONAL_ONLY=1; shift ;;
+    --feat-fix-only | -F) FEAT_FIX_ONLY=1; shift ;;
     -h | --help)
       cat <<'EOF'
-Usage: git-unported [--conventional-only|-c] [main-branch] [release-branch] [remote]
+Usage: git-unported [options] [main-branch] [release-branch] [remote]
 
   --conventional-only, -c   list only conventional commits (feat:, fix:, docs:, …)
-  -h, --help                show this help
+  --feat-fix-only, -F     list only feat: and fix: (including feat!/fix! and optional scope)
+  -h, --help              show this help
 
 Defaults: main  release/1.0  origin
 EOF
@@ -58,6 +61,16 @@ strip_body_edges() {
 is_conventional() {
   local re='^[a-z][a-z0-9]*[[:space:]]*(\([^)]*\))?(!)?:[[:space:]]*'
   [[ "$1" =~ $re ]]
+}
+
+# Conventional type is exactly feat or fix (scope / ! allowed, same spacing rules as is_conventional)
+is_feat_or_fix() {
+  local re='^([a-z][a-z0-9]*)([[:space:]]*\([^)]*\))?(!)?:'
+  [[ "$1" =~ $re ]] || return 1
+  case "${BASH_REMATCH[1]}" in
+    feat | fix) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # Colorize the first line when it is conventional (type token highlighted by category)
@@ -207,11 +220,15 @@ check_repo() {
     local first_line="${message%%$'\n'*}"
 
     if is_conventional "$first_line"; then
+      if ((FEAT_FIX_ONLY)) && ! is_feat_or_fix "$first_line"; then
+        continue
+      fi
       ch+=("$hash")
       cd+=("$date")
       ca+=("$author")
       cm+=("$message")
     else
+      ((FEAT_FIX_ONLY)) && continue
       oh+=("$hash")
       od+=("$date")
       oa+=("$author")
@@ -223,6 +240,7 @@ check_repo() {
   local n_other=${#oh[@]}
   ((n_conv + n_other == 0)) && return
   ((CONVENTIONAL_ONLY && n_conv == 0)) && return
+  ((FEAT_FIX_ONLY && n_conv == 0)) && return
 
   local rule_w="${COLUMNS:-120}"
   ((rule_w < 88)) && rule_w=88
@@ -253,7 +271,7 @@ check_repo() {
   if ((n_other > 0 && CONVENTIONAL_ONLY == 0)); then
     echo ""
     if ((n_conv > 0)); then
-      echo "${DIM}  Other commits${RESET}  ${DIM}(no conventional prefix — often minor)${RESET}"
+      echo "${DIM}  Other commits${RESET}  ${DIM}(no conventional prefix; often minor)${RESET}"
     else
       echo "${DIM}  Other commits${RESET}  ${DIM}(no feat/fix/docs/… prefix)${RESET}"
     fi
@@ -284,6 +302,9 @@ echo "${BOLD}Unported commits${RESET}  ${CYAN}${MAIN}${RESET} → not in ${CYAN}
 echo "${DIM}Excluded: -x cherry-pick trailers on the release branch (if in doubt, this wins), and commits whose patch already exists on release (git cherry / patch-id).${RESET}"
 if ((CONVENTIONAL_ONLY)); then
   echo "${DIM}Showing conventional commits only (use without --conventional-only to include the rest).${RESET}"
+fi
+if ((FEAT_FIX_ONLY)); then
+  echo "${DIM}Showing only feat: and fix: (use without --feat-fix-only to include other types).${RESET}"
 fi
 
 # root repo
