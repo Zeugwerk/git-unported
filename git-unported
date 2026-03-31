@@ -1,0 +1,234 @@
+#!/usr/bin/env bash
+# git-unported — show commits on MAIN not yet in RELEASE
+# accounts for cherry-picks made with -x in either direction
+# runs on root repo and all submodules
+#
+# Usage: git-unported [main-branch] [release-branch] [remote]
+# Defaults: main  release/1.0  origin
+
+set -euo pipefail
+
+MAIN="${1:-main}"
+RELEASE="${2:-release/1.0}"
+REMOTE="${3:-origin}"
+
+BOLD=$'\e[1m'
+DIM=$'\e[2m'
+RESET=$'\e[0m'
+CYAN=$'\e[36m'
+YELLOW=$'\e[33m'
+GREEN=$'\e[32m'
+MAGENTA=$'\e[35m'
+RED=$'\e[31m'
+
+# First line matches Conventional Commits (type, optional scope, optional !, : description)
+is_conventional() {
+  [[ "$1" =~ ^[a-z][a-z0-9]*(\([^)]*\))?(!)?:[[:space:]]* ]]
+}
+
+# Colorize the first line when it is conventional (type token highlighted by category)
+format_conv_first_line() {
+  local line="$1"
+  if [[ "$line" =~ ^([a-z][a-z0-9]*)(\([^)]*\))?(!)?(:)[[:space:]]*(.*)$ ]]; then
+    local typ="${BASH_REMATCH[1]}"
+    local scope_bang="${BASH_REMATCH[2]}${BASH_REMATCH[3]}${BASH_REMATCH[4]}"
+    local desc="${BASH_REMATCH[5]}"
+    local tc
+    case "$typ" in
+      feat) tc="${BOLD}${GREEN}" ;;
+      fix | perf) tc="${BOLD}${YELLOW}" ;;
+      revert) tc="${BOLD}${RED}" ;;
+      doc | docs) tc="${BOLD}${CYAN}" ;;
+      test | build | ci) tc="${MAGENTA}" ;;
+      chore | style) tc="${DIM}" ;;
+      refactor) tc="${CYAN}" ;;
+      *) tc="${BOLD}" ;;
+    esac
+    echo -n "${tc}${typ}${RESET}${scope_bang} ${desc}"
+  else
+    echo -n "$line"
+  fi
+}
+
+print_commit_block() {
+  local hash="$1" date="$2" author="$3" message="$4" mode="$5"
+  local first rest
+  author="${author:0:20}"
+
+  if [[ "$message" == *$'\n'* ]]; then
+    first="${message%%$'\n'*}"
+    rest="${message#*$'\n'}"
+  else
+    first="$message"
+    rest=""
+  fi
+
+  printf "  ${YELLOW}%-10s${RESET}  ${DIM}%-11s${RESET}  ${GREEN}%-22s${RESET}  " \
+    "$hash" "$date" "$author"
+
+  if [[ "$mode" == conv ]]; then
+    echo "$(format_conv_first_line "$first")${RESET}"
+  else
+    echo "${DIM}${first}${RESET}"
+  fi
+
+  if [[ -n "$rest" ]]; then
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      if [[ "$mode" == conv ]]; then
+        printf "  ${YELLOW}%-10s${RESET}  ${DIM}%-11s${RESET}  ${GREEN}%-22s${RESET}  ${DIM}%s${RESET}\n" \
+          "" "" "" "$line"
+      else
+        printf "  ${DIM}%-10s  %-11s  %-22s  %s${RESET}\n" "" "" "" "$line"
+      fi
+    done <<< "$rest"
+  fi
+  echo ""
+}
+
+check_repo() {
+  local label="$1"
+  local fullpath="$2"
+  local main="$3"
+  local release="$4"
+
+  git fetch "$REMOTE" --quiet 2>/dev/null || true
+
+  local mb="$REMOTE/$main"
+  local rb="$REMOTE/$release"
+
+  git rev-parse --verify "$mb" &>/dev/null || mb="$main"
+  git rev-parse --verify "$rb" &>/dev/null || rb="$release"
+
+  if ! git rev-parse --verify "$mb" &>/dev/null; then
+    echo "${DIM}  skipping $label — branch $main not found${RESET}"
+    return
+  fi
+  if ! git rev-parse --verify "$rb" &>/dev/null; then
+    echo "${DIM}  skipping $label — branch $release not found${RESET}"
+    return
+  fi
+
+  local ported
+  ported=$(git log "$rb" --format="%B" \
+    | grep -oE '\(cherry picked from commit [0-9a-f]+\)' \
+    | grep -oE '[0-9a-f]{7,}' || true)
+
+  local -a ch=() cd=() ca=() cm=()
+  local -a oh=() od=() oa=() om=()
+
+  while IFS= read -r -d '' hash; do
+    IFS= read -r -d '' date || break
+    IFS= read -r -d '' author || break
+    IFS= read -r -d '' message || break
+
+    local full_hash
+    full_hash=$(git rev-parse "$hash" 2>/dev/null || echo "")
+
+    local skip=0
+    if [[ -n "$ported" && -n "$full_hash" ]]; then
+      echo "$ported" | grep -qF "${full_hash:0:12}" && skip=1
+    fi
+    [[ $skip -eq 1 ]] && continue
+
+    local first_line="${message%%$'\n'*}"
+
+    if is_conventional "$first_line"; then
+      ch+=("$hash")
+      cd+=("$date")
+      ca+=("$author")
+      cm+=("$message")
+    else
+      oh+=("$hash")
+      od+=("$date")
+      oa+=("$author")
+      om+=("$message")
+    fi
+  done < <(git log "$mb" --not "$rb" -z --format=$'%h%c0%ad%c0%an%c0%B' --date=short 2>/dev/null || true)
+
+  local n_conv=${#ch[@]}
+  local n_other=${#oh[@]}
+  ((n_conv + n_other == 0)) && return
+
+  local rule_w="${COLUMNS:-120}"
+  ((rule_w < 88)) && rule_w=88
+  local rule_line
+  rule_line=$(printf '%*s' "$rule_w" '' | tr ' ' '─')
+
+  echo ""
+  if [[ "$label" == "root" ]]; then
+    echo "${BOLD}${CYAN}● root repo${RESET}"
+  else
+    echo "${BOLD}${CYAN}● submodule: ${label}${RESET}  ${DIM}(${fullpath})${RESET}"
+  fi
+  echo "${DIM}${rule_line}${RESET}"
+  printf "${DIM}  %-10s  %-11s  %-22s  %s${RESET}\n" "hash" "date" "author" "message"
+  echo "${DIM}${rule_line}${RESET}"
+
+  local i
+  if ((n_conv > 0 && n_other > 0)); then
+    echo ""
+    echo "${BOLD}  Conventional commits${RESET}  ${DIM}(feat, fix, docs, …)${RESET}"
+    echo "${DIM}${rule_line}${RESET}"
+  fi
+
+  for ((i = 0; i < n_conv; i++)); do
+    print_commit_block "${ch[i]}" "${cd[i]}" "${ca[i]}" "${cm[i]}" conv
+  done
+
+  if ((n_other > 0)); then
+    echo ""
+    if ((n_conv > 0)); then
+      echo "${DIM}  Other commits${RESET}  ${DIM}(no conventional prefix — often minor)${RESET}"
+    else
+      echo "${DIM}  Other commits${RESET}  ${DIM}(no feat/fix/docs/… prefix)${RESET}"
+    fi
+    echo "${DIM}${rule_line}${RESET}"
+    for ((i = 0; i < n_other; i++)); do
+      print_commit_block "${oh[i]}" "${od[i]}" "${oa[i]}" "${om[i]}" other
+    done
+  fi
+}
+
+# Resolve the repo whose .gitmodules we should read. If the shell cwd is inside a
+# submodule, `git rev-parse --show-toplevel` is that submodule only — no .gitmodules,
+# so sibling submodules are never scanned. Prefer the superproject when it exists.
+HERE_TOP=$(git rev-parse --show-toplevel)
+SUPER=$(git rev-parse --show-superproject-working-tree 2>/dev/null || true)
+if [[ -n "$SUPER" && -f "$SUPER/.gitmodules" ]]; then
+  REPO_ROOT=$SUPER
+else
+  REPO_ROOT=$HERE_TOP
+fi
+cd "$REPO_ROOT" || {
+  echo "cannot cd to repo root: $REPO_ROOT" >&2
+  exit 1
+}
+
+echo ""
+echo "${BOLD}Unported commits${RESET}  ${CYAN}${MAIN}${RESET} → not in ${CYAN}${RELEASE}${RESET}"
+echo "${DIM}Commits already cherry-picked with -x are excluded.${RESET}"
+
+# root repo
+check_repo "root" "." "$MAIN" "$RELEASE"
+
+# read submodule paths directly from .gitmodules
+if [[ -f "$REPO_ROOT/.gitmodules" ]]; then
+  while IFS= read -r subpath; do
+    [[ -z "$subpath" ]] && continue
+    # strip CR from .gitmodules on Windows-style checkouts
+    subpath="${subpath//$'\r'/}"
+    local_path="$REPO_ROOT/$subpath"
+    if ! git -C "$local_path" rev-parse --is-inside-work-tree &>/dev/null; then
+      echo "${DIM}  skipping submodule ${subpath} — not a git checkout${RESET}"
+      continue
+    fi
+    subname=$(basename "$subpath")
+    (
+      cd "$local_path"
+      check_repo "$subname" "$subpath" "$MAIN" "$RELEASE"
+    )
+  done < <(git config --file "$REPO_ROOT/.gitmodules" --get-regexp '^submodule\..*\.path$' \
+    | awk '{print $2}')
+fi
+
+echo ""
