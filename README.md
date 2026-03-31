@@ -4,9 +4,7 @@ Tooling that lists **commits present on an integration branch (for example `main
 
 It runs in the **top-level Git repo** and, when `.gitmodules` exists, repeats the same check for **each first-level submodule**.
 
-<img width="1260" height="290" alt="Screenshot_20260331_214624" src="https://github.com/user-attachments/assets/949d3de0-2267-4873-8aaf-d8dfd3311705" />
-
-
+<img width="1193" height="352" alt="Screenshot_20260331_224234" src="https://github.com/user-attachments/assets/bbba0005-a6ab-4688-8232-e033a3313bdc" />
 
 ## When this is useful (release flow)
 
